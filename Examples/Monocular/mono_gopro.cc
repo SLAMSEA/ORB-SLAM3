@@ -1,7 +1,7 @@
 /**
  * This file is part of ORB-SLAM3
  *
- * Copyright (C) 2017-2020 Carlos Campos, Richard Elvira, Juan J. Gómez
+ * Copyright (C) 2017-2020 Carlos Campos, Richard Elvira, Juan D. Gómez
  * Rodríguez, José M.M. Montiel and Juan D. Tardós, University of Zaragoza.
  * Copyright (C) 2014-2016 Raúl Mur-Artal, José M.M. Montiel and Juan D. Tardós,
  * University of Zaragoza.
@@ -23,6 +23,7 @@
 #include <chrono>
 #include <fstream>
 #include <iostream>
+#include <unistd.h>
 
 #include <opencv2/core/core.hpp>
 
@@ -30,110 +31,194 @@
 
 using namespace std;
 
-int main(int argc, char **argv) {
-  if (argc != 4) {
-    cerr << endl
-         << "Usage: ./mono_gopro path_to_vocabulary path_to_settings "
-            "path_to_gopro_video"
-         << endl;
-    return 1;
-  }
+int main(int argc, char **argv)
+{
+    if (argc != 4)
+    {
+        cerr << endl
+             << "Usage: ./mono_gopro path_to_vocabulary "
+             << "path_to_settings path_to_gopro_video"
+             << endl;
 
-  // open settings to get image resolution
-  cv::FileStorage fsSettings(argv[2], cv::FileStorage::READ);
-  if(!fsSettings.isOpened()) {
-     cerr << "Failed to open settings file at: " << argv[2] << endl;
-     exit(-1);
-  }
-  cv::Size img_size(fsSettings["Camera.width"],fsSettings["Camera.height"]);
-  fsSettings.release();
-
-  // Retrieve paths to images
-  vector<double> vTimestamps;
-  // Create SLAM system. It initializes all system threads and gets ready to
-  // process frames.
-  ORB_SLAM3::System SLAM(argv[1], argv[2], ORB_SLAM3::System::MONOCULAR, true);
-
-  // Vector for tracking time statistics
-  vector<float> vTimesTrack;
-  cv::VideoCapture cap(argv[3]);
-  // Check if camera opened successfully
-  if (!cap.isOpened()) {
-    std::cout << "Error opening video stream or file" << endl;
-    return -1;
-  }
-
-  // Main loop
-
-  int cnt_empty_frame = 0;
-  int img_id = 0;
-  int nImages = cap.get(cv::CAP_PROP_FRAME_COUNT);
-  double fps = cap.get(cv::CAP_PROP_FPS);
-  double frame_diff_s = 1./fps;
-  while (1) {
-    cv::Mat im,im_track;
-    bool success = cap.read(im);
-    if (!success) {
-      cnt_empty_frame++;
-      std::cout<<"Empty frame...\n";
-      if (cnt_empty_frame > 1000)
-        break;
-      continue;
+        return 1;
     }
-      im_track = im.clone();
-      double tframe = cap.get(cv::CAP_PROP_POS_MSEC) * 1e-3;
-      ++img_id;
-      cv::resize(im_track, im_track, img_size);
+
+    // Open settings to get image resolution
+    cv::FileStorage fsSettings(argv[2], cv::FileStorage::READ);
+
+    if (!fsSettings.isOpened())
+    {
+        cerr << "Failed to open settings file at: "
+             << argv[2] << endl;
+
+        exit(-1);
+    }
+
+    cv::Size img_size(
+        fsSettings["Camera.width"],
+        fsSettings["Camera.height"]);
+
+    fsSettings.release();
+
+    // Create SLAM system
+    ORB_SLAM3::System SLAM(
+        argv[1],
+        argv[2],
+        ORB_SLAM3::System::MONOCULAR,
+        true);
+
+    // Vector for tracking time statistics
+    vector<float> vTimesTrack;
+
+    // Open video
+    cv::VideoCapture cap(argv[3]);
+
+    if (!cap.isOpened())
+    {
+        cout << "Error opening video stream or file"
+             << endl;
+
+        return -1;
+    }
+
+    int img_id = 0;
+
+    int nImages =
+        static_cast<int>(
+            cap.get(cv::CAP_PROP_FRAME_COUNT));
+
+    double fps =
+        cap.get(cv::CAP_PROP_FPS);
+
+    double frame_diff_s = 1.0 / fps;
+
+    // Main loop
+    while (true)
+    {
+        cv::Mat im, im_track;
+
+        bool success = cap.read(im);
+
+        // End of video
+        if (!success || im.empty())
+        {
+            cout << "End of video." << endl;
+            break;
+        }
+
+        im_track = im.clone();
+
+        ++img_id;
+
+        // Stable timestamp
+        double tframe =
+            static_cast<double>(img_id) / fps;
+
+        // Resize image
+        cv::resize(im_track, im_track, img_size);
 
 #ifdef COMPILEDWITHC11
-      std::chrono::steady_clock::time_point t1 =
-          std::chrono::steady_clock::now();
+        chrono::steady_clock::time_point t1 =
+            chrono::steady_clock::now();
 #else
-      std::chrono::monotonic_clock::time_point t1 =
-          std::chrono::monotonic_clock::now();
+        chrono::monotonic_clock::time_point t1 =
+            chrono::monotonic_clock::now();
 #endif
 
-      // Pass the image to the SLAM system
-      SLAM.TrackMonocular(im_track, tframe);
+        // Pass image to SLAM
+        SLAM.TrackMonocular(im_track, tframe);
 
 #ifdef COMPILEDWITHC11
-      std::chrono::steady_clock::time_point t2 =
-          std::chrono::steady_clock::now();
+        chrono::steady_clock::time_point t2 =
+            chrono::steady_clock::now();
 #else
-      std::chrono::monotonic_clock::time_point t2 =
-          std::chrono::monotonic_clock::now();
+        chrono::monotonic_clock::time_point t2 =
+            chrono::monotonic_clock::now();
 #endif
 
-      double ttrack =
-          std::chrono::duration_cast<std::chrono::duration<double>>(t2 - t1)
-              .count();
+        double ttrack =
+            chrono::duration_cast<
+                chrono::duration<double>>(
+                t2 - t1)
+                .count();
 
-      if (img_id % 100 == 0) {
-        std::cout<<"Video FPS: "<<1./frame_diff_s<<"\n";
-        std::cout<<"ORB-SLAM 3 running at: "<<1./ttrack<< " FPS\n";
-      }
-      vTimesTrack.push_back(ttrack);
+        if (img_id % 100 == 0)
+        {
+            cout << "Video FPS: "
+                 << fps << "\n";
 
-      // Wait to load the next frame
-      if (ttrack < frame_diff_s)
-        usleep((frame_diff_s - ttrack) * 1e6);
-  }
+            cout << "ORB-SLAM3 running at: "
+                 << 1.0 / ttrack
+                 << " FPS\n";
+        }
+        // Autosave every 500 frames
+        if (img_id % 150 == 0)
+        {
+            cout << "Autosaving trajectory..."
+                << endl;
 
-  //    // Stop all threads
-  //SLAM.Shutdown();
+            SLAM.SaveKeyFrameTrajectoryTUM(
+                "KeyFrameTrajectory_autosave.txt");
 
-  // Tracking time statistics
-  sort(vTimesTrack.begin(), vTimesTrack.end());
-  float totaltime = 0;
-  for (auto ni = 0; ni < vTimestamps.size(); ni++) {
-    totaltime += vTimesTrack[ni];
-  }
-  cout << "-------" << endl << endl;
-  cout << "median tracking time: " << vTimesTrack[nImages / 2] << endl;
-  cout << "mean tracking time: " << totaltime / nImages << endl;
+            cout << "Autosave complete."
+                << endl;
+        }
 
-  // Save camera trajectory
-  SLAM.SaveKeyFrameTrajectoryTUM("KeyFrameTrajectory.txt");
+        vTimesTrack.push_back(ttrack);
 
-  return 0;
+        // Wait to simulate real-time playback
+        if (ttrack < frame_diff_s)
+        {
+            usleep(
+                (frame_diff_s - ttrack) * 1e6);
+        }
+    }
+
+    // Shutdown SLAM properly
+    SLAM.Shutdown();
+
+    // Give viewer / local mapping time to finish
+    usleep(1000000);
+
+    // Tracking time statistics
+    sort(
+        vTimesTrack.begin(),
+        vTimesTrack.end());
+
+    float totaltime = 0;
+
+    for (size_t i = 0;
+         i < vTimesTrack.size();
+         i++)
+    {
+        totaltime += vTimesTrack[i];
+    }
+
+    cout << "-------" << endl
+         << endl;
+
+    if (!vTimesTrack.empty())
+    {
+        cout << "median tracking time: "
+             << vTimesTrack[
+                    vTimesTrack.size() / 2]
+             << endl;
+
+        cout << "mean tracking time: "
+             << totaltime /
+                    vTimesTrack.size()
+             << endl;
+    }
+
+    // Save trajectories
+    cout << "Saving trajectories..."
+         << endl;
+
+    SLAM.SaveKeyFrameTrajectoryTUM(
+        "KeyFrameTrajectory.txt");
+
+    cout << "Trajectories saved."
+         << endl;
+
+    return 0;
 }
