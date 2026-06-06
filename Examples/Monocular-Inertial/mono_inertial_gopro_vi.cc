@@ -23,6 +23,7 @@
 #include <chrono>
 #include <fstream>
 #include <iostream>
+#include <signal.h>
 
 #include <opencv2/core/core.hpp>
 
@@ -33,6 +34,17 @@
 using namespace std;
 using nlohmann::json;
 const double MS_TO_S = 1e-3; ///< Milliseconds to second conversion
+
+volatile sig_atomic_t stop_requested = 0;
+
+void signalHandler(int signum)
+{
+    std::cout
+        << "\nCTRL+C detected. Stopping safely..."
+        << std::endl;
+
+    stop_requested = 1;
+}
 
 bool LoadTelemetry(const string &strImuPath,
                    vector<double> &vTimeStamps,
@@ -66,6 +78,8 @@ int main(int argc, char **argv) {
   // process frames.
   ORB_SLAM3::System SLAM(argv[1], argv[2], ORB_SLAM3::System::IMU_MONOCULAR, true);
 
+  signal(SIGINT, signalHandler);
+
   // Vector for tracking time statistics
   vector<float> vTimesTrack;
   cv::VideoCapture cap(argv[3]);
@@ -83,19 +97,59 @@ int main(int argc, char **argv) {
   double frame_diff_s = 1./fps;
   std::vector<ORB_SLAM3::IMU::Point> vImuMeas;
   size_t last_imu_idx = 0;
+  bool interrupted_by_user = false;
+  bool video_finished = false;
+
+  double last_autosave_time = 0.0;
+  double last_frame_time = -1.0;
   while (1) {
+          if(stop_requested)
+          {
+            interrupted_by_user = true;
+            break;
+          }
     cv::Mat im,im_track;
     bool success = cap.read(im);
 
-    if (!success) {
-      cnt_empty_frame++;
-      std::cout<<"Empty frame...\n";
-      if (cnt_empty_frame > 1000)
-        break;
-      continue;
-    }
+if (!success)
+{
+    std::cout
+        << "Video finished or decoder error."
+        << std::endl;
+
+    video_finished = true;
+    break;
+}
       im_track = im.clone();
       double tframe = cap.get(cv::CAP_PROP_POS_MSEC) * MS_TO_S;
+      if(last_frame_time >= 0.0 &&
+   tframe < last_frame_time)
+{
+    std::cout
+        << "\nERROR: Timestamp decreased!"
+        << std::endl;
+
+    std::cout
+        << "Previous: "
+        << last_frame_time
+        << " s"
+        << std::endl;
+
+    std::cout
+        << "Current : "
+        << tframe
+        << " s"
+        << std::endl;
+
+    std::cout
+        << "Saving trajectory and stopping..."
+        << std::endl;
+
+    video_finished = true;
+    break;
+}
+
+last_frame_time = tframe;
       ++img_id;
 
       cv::resize(im_track, im_track, img_size);
@@ -103,13 +157,22 @@ int main(int argc, char **argv) {
       // gather imu measurements between frames
       // Load imu measurements from previous frame
       vImuMeas.clear();
-      while(imuTimestamps[last_imu_idx] <= tframe && tframe > 0)
-      {
-          vImuMeas.push_back(ORB_SLAM3::IMU::Point(vAcc[last_imu_idx].x,vAcc[last_imu_idx].y,vAcc[last_imu_idx].z,
-                                                   vGyr[last_imu_idx].x,vGyr[last_imu_idx].y,vGyr[last_imu_idx].z,
-                                                   imuTimestamps[last_imu_idx]));
-          last_imu_idx++;
-      }
+while(last_imu_idx < imuTimestamps.size() &&
+      imuTimestamps[last_imu_idx] <= tframe &&
+      tframe > 0)
+{
+    vImuMeas.push_back(
+        ORB_SLAM3::IMU::Point(
+            vAcc[last_imu_idx].x,
+            vAcc[last_imu_idx].y,
+            vAcc[last_imu_idx].z,
+            vGyr[last_imu_idx].x,
+            vGyr[last_imu_idx].y,
+            vGyr[last_imu_idx].z,
+            imuTimestamps[last_imu_idx]));
+
+    last_imu_idx++;
+}
 
 
 #ifdef COMPILEDWITHC11
@@ -122,6 +185,28 @@ int main(int argc, char **argv) {
 
       // Pass the image to the SLAM system
       SLAM.TrackMonocular(im_track, tframe, vImuMeas);
+      if((tframe - last_autosave_time) >= 5.0)
+      {
+        std::cout
+          << "[AUTOSAVE] t = "
+          << tframe
+          << " s"
+          << std::endl;
+
+        try
+        {
+          SLAM.SaveKeyFrameTrajectoryTUM(
+              "KeyFrameTrajectory_AutoSave.txt");
+        }
+        catch(...)
+        {
+          std::cout
+              << "[AUTOSAVE] failed"
+              << std::endl;
+        }
+
+        last_autosave_time = tframe;
+      } 
 
 #ifdef COMPILEDWITHC11
       std::chrono::steady_clock::time_point t2 =
@@ -146,21 +231,61 @@ int main(int argc, char **argv) {
         usleep((frame_diff_s - ttrack) * 1e6);
   }
 
-  // Stop all threads
-  SLAM.Shutdown();
+  // Stop all threads and saving trajectory
+if(interrupted_by_user)
+{
+    std::cout
+        << "Saving interrupted trajectory..."
+        << std::endl;
+
+    SLAM.SaveKeyFrameTrajectoryTUM(
+        "KeyFrameTrajectory_Interrupted.txt");
+}
+else if(video_finished)
+{
+    std::cout
+        << "Saving final trajectory..."
+        << std::endl;
+
+    SLAM.SaveKeyFrameTrajectoryTUM(
+        "KeyFrameTrajectory_Final.txt");
+}
+else
+{
+    std::cout
+        << "Saving trajectory..."
+        << std::endl;
+
+    SLAM.SaveKeyFrameTrajectoryTUM(
+        "KeyFrameTrajectory.txt");
+}
+
+SLAM.Shutdown();
 
   // Tracking time statistics
   sort(vTimesTrack.begin(), vTimesTrack.end());
-  float totaltime = 0;
-  for (auto ni = 0; ni < vTimestamps.size(); ni++) {
-    totaltime += vTimesTrack[ni];
-  }
-  cout << "-------" << endl << endl;
-  cout << "median tracking time: " << vTimesTrack[nImages / 2] << endl;
-  cout << "mean tracking time: " << totaltime / nImages << endl;
+float totaltime = 0;
 
-  // Save camera trajectory
-  SLAM.SaveKeyFrameTrajectoryTUM("KeyFrameTrajectory.txt");
+for(size_t ni = 0;
+    ni < vTimesTrack.size();
+    ni++)
+{
+    totaltime += vTimesTrack[ni];
+}
+  cout << "-------" << endl << endl;
+if(!vTimesTrack.empty())
+{
+    cout << "median tracking time: "
+         << vTimesTrack[vTimesTrack.size()/2]
+         << endl;
+}
+if(!vTimesTrack.empty())
+{
+    cout << "mean tracking time: "
+         << totaltime / vTimesTrack.size()
+         << endl;
+}
+
 
   return 0;
 }
